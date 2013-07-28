@@ -70,8 +70,6 @@ HTMLTextAreaElement::HTMLTextAreaElement(already_AddRefed<nsINodeInfo> aNodeInfo
   AddStatesSilently(NS_EVENT_STATE_ENABLED |
                     NS_EVENT_STATE_OPTIONAL |
                     NS_EVENT_STATE_VALID);
-
-  SetIsDOMBinding();
 }
 
 
@@ -948,7 +946,7 @@ HTMLTextAreaElement::SaveState()
   // Only save if value != defaultValue (bug 62713)
   nsPresState *state = nullptr;
   if (mValueChanged) {
-    rv = GetPrimaryPresState(this, &state);
+    state = GetPrimaryPresState();
     if (state) {
       nsAutoString value;
       GetValueInternal(value, true);
@@ -971,7 +969,8 @@ HTMLTextAreaElement::SaveState()
 
   if (mDisabledChanged) {
     if (!state) {
-      rv = GetPrimaryPresState(this, &state);
+      state = GetPrimaryPresState();
+      rv = NS_OK;
     }
     if (state) {
       // We do not want to save the real disabled state but the disabled

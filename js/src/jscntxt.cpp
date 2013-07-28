@@ -8,25 +8,21 @@
  * JS execution context.
  */
 
-#include "jscntxt.h"
+#include "jscntxtinlines.h"
+
+#include "mozilla/DebugOnly.h"
+#include "mozilla/MemoryReporting.h"
+#include "mozilla/Util.h"
 
 #include <locale.h>
 #include <stdarg.h>
 #include <string.h>
-
-#include "mozilla/DebugOnly.h"
-
 #ifdef ANDROID
 # include <android/log.h>
 # include <fstream>
 # include <string>
 #endif  // ANDROID
 
-#include "mozilla/MemoryReporting.h"
-#include "mozilla/Util.h"
-
-#include "jstypes.h"
-#include "jsprf.h"
 #include "jsatom.h"
 #include "jscompartment.h"
 #include "jsdbgapi.h"
@@ -37,21 +33,22 @@
 #include "jsmath.h"
 #include "jsobj.h"
 #include "jsopcode.h"
+#include "jsprf.h"
 #include "jspubtd.h"
 #include "jsscript.h"
 #include "jsstr.h"
+#include "jstypes.h"
 #include "jsworkers.h"
+
+#include "gc/Marking.h"
 #ifdef JS_ION
 #include "ion/Ion.h"
 #endif
-
-#include "gc/Marking.h"
 #include "js/CharacterEncoding.h"
 #include "js/MemoryMetrics.h"
 #include "vm/Shape.h"
 #include "yarr/BumpPointerAllocator.h"
 
-#include "jscntxtinlines.h"
 #include "jsobjinlines.h"
 
 #include "vm/Stack-inl.h"
@@ -260,9 +257,10 @@ js::DestroyContext(JSContext *cx, DestroyContextMode mode)
         for (CompartmentsIter c(rt); !c.done(); c.next())
             c->types.print(cx, false);
 
-        /* Off thread ion compilations depend on atoms still existing. */
+        /* Off thread compilation and parsing depend on atoms still existing. */
         for (CompartmentsIter c(rt); !c.done(); c.next())
             CancelOffThreadIonCompile(c, NULL);
+        WaitForOffThreadParsingToFinish(rt);
 
         /* Unpin all common names before final GC. */
         FinishCommonNames(rt);
@@ -375,8 +373,12 @@ PopulateReportBlame(JSContext *cx, JSErrorReport *report)
  * not occur, so GC must be avoided or suppressed.
  */
 void
-js_ReportOutOfMemory(JSContext *cx)
+js_ReportOutOfMemory(ThreadSafeContext *cxArg)
 {
+    if (!cxArg->isJSContext())
+        return;
+    JSContext *cx = cxArg->asJSContext();
+
     cx->runtime()->hadOutOfMemory = true;
 
     if (JS_IsRunning(cx)) {
@@ -401,6 +403,18 @@ js_ReportOutOfMemory(JSContext *cx)
         AutoSuppressGC suppressGC(cx);
         onError(cx, msg, &report);
     }
+
+    /*
+     * We would like to enforce the invariant that any exception reported
+     * during an OOM situation does not require wrapping. Besides avoiding
+     * allocation when memory is low, this reduces the number of places where
+     * we might need to GC.
+     *
+     * When JS code is running, we set the pending exception to an atom, which
+     * does not need wrapping. If no JS code is running, no exception should be
+     * set at all.
+     */
+    JS_ASSERT(!cx->isExceptionPending());
 }
 
 JS_FRIEND_API(void)
@@ -422,12 +436,20 @@ js_ReportOverRecursed(JSContext *maybecx)
 }
 
 void
-js_ReportAllocationOverflow(JSContext *maybecx)
+js_ReportOverRecursed(ThreadSafeContext *cx)
 {
-    if (maybecx) {
-        AutoSuppressGC suppressGC(maybecx);
-        JS_ReportErrorNumber(maybecx, js_GetErrorMessage, NULL, JSMSG_ALLOC_OVERFLOW);
-    }
+    js_ReportOverRecursed(cx->maybeJSContext());
+}
+
+void
+js_ReportAllocationOverflow(ThreadSafeContext *cxArg)
+{
+    if (!cxArg || !cxArg->isJSContext())
+        return;
+    JSContext *cx = cxArg->asJSContext();
+
+    AutoSuppressGC suppressGC(cx);
+    JS_ReportErrorNumber(cx, js_GetErrorMessage, NULL, JSMSG_ALLOC_OVERFLOW);
 }
 
 /*
@@ -1022,21 +1044,9 @@ js_HandleExecutionInterrupt(JSContext *cx)
 js::ThreadSafeContext::ThreadSafeContext(JSRuntime *rt, PerThreadData *pt, ContextKind kind)
   : ContextFriendFields(rt),
     contextKind_(kind),
-    perThreadData(pt)
+    perThreadData(pt),
+    allocator_(NULL)
 { }
-
-bool
-ThreadSafeContext::isJSContext() const
-{
-    return contextKind_ == Context_JS;
-}
-
-JSContext *
-ThreadSafeContext::asJSContext()
-{
-    JS_ASSERT(isJSContext());
-    return reinterpret_cast<JSContext *>(this);
-}
 
 bool
 ThreadSafeContext::isForkJoinSlice() const
@@ -1052,14 +1062,13 @@ ThreadSafeContext::asForkJoinSlice()
 }
 
 JSContext::JSContext(JSRuntime *rt)
-  : ThreadSafeContext(rt, &rt->mainThread, Context_JS),
+  : ExclusiveContext(rt, &rt->mainThread, Context_JS),
     throwing(false),
     exception(UndefinedValue()),
     options_(0),
     reportGranularity(JS_DEFAULT_JITREPORT_GRANULARITY),
     resolvingList(NULL),
     generatingError(false),
-    enterCompartmentDepth_(0),
     savedFrameChains_(),
     defaultCompartmentObject_(NULL),
     cycleDetectorSet(MOZ_THIS_IN_INITIALIZER_LIST()),
@@ -1084,13 +1093,6 @@ JSContext::JSContext(JSRuntime *rt)
 
     JS_ASSERT(static_cast<ContextFriendFields*>(this) ==
               ContextFriendFields::get(this));
-
-#ifdef JSGC_TRACK_EXACT_ROOTS
-    PodArrayZero(thingGCRooters);
-#endif
-#if defined(DEBUG) && defined(JS_GC_ZEAL) && defined(JSGC_ROOT_ANALYSIS) && !defined(JS_THREADSAFE)
-    skipGCRooters = NULL;
-#endif
 }
 
 JSContext::~JSContext()
@@ -1109,7 +1111,7 @@ JSContext::wrapPendingException()
 {
     RootedValue value(this, getPendingException());
     clearPendingException();
-    if (compartment()->wrap(this, &value))
+    if (!IsAtomsCompartment(compartment()) && compartment()->wrap(this, &value))
         setPendingException(value);
 }
 
@@ -1146,14 +1148,9 @@ JSContext::saveFrameChain()
     if (Activation *act = mainThread().activation())
         act->saveFrameChain();
 
-    if (defaultCompartmentObject_)
-        setCompartment(defaultCompartmentObject_->compartment());
-    else
-        setCompartment(NULL);
+    setCompartment(NULL);
     enterCompartmentDepth_ = 0;
 
-    if (isExceptionPending())
-        wrapPendingException();
     return true;
 }
 
@@ -1311,10 +1308,22 @@ JS::AutoCheckRequestDepth::AutoCheckRequestDepth(JSContext *cx)
     cx->runtime()->checkRequestDepth++;
 }
 
+JS::AutoCheckRequestDepth::AutoCheckRequestDepth(ContextFriendFields *cxArg)
+    : cx(static_cast<ThreadSafeContext *>(cxArg)->maybeJSContext())
+{
+    if (cx) {
+        JS_ASSERT(cx->runtime()->requestDepth || cx->runtime()->isHeapBusy());
+        cx->runtime()->assertValidThread();
+        cx->runtime()->checkRequestDepth++;
+    }
+}
+
 JS::AutoCheckRequestDepth::~AutoCheckRequestDepth()
 {
-    JS_ASSERT(cx->runtime()->checkRequestDepth != 0);
-    cx->runtime()->checkRequestDepth--;
+    if (cx) {
+        JS_ASSERT(cx->runtime()->checkRequestDepth != 0);
+        cx->runtime()->checkRequestDepth--;
+    }
 }
 
 #endif

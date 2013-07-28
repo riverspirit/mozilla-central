@@ -12,8 +12,8 @@
 
 #include "mozilla/PodOperations.h"
 
-#include <stdio.h>
 #include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "jsapi.h"
@@ -117,7 +117,7 @@ frontend::IsKeyword(JSLinearString *str)
     return FindKeyword(str->chars(), str->length()) != NULL;
 }
 
-TokenStream::SourceCoords::SourceCoords(JSContext *cx, uint32_t ln)
+TokenStream::SourceCoords::SourceCoords(ExclusiveContext *cx, uint32_t ln)
   : lineStartOffsets_(cx), initialLineNum_(ln), lastLineIndex_(0)
 {
     // This is actually necessary!  Removing it causes compile errors on
@@ -153,7 +153,9 @@ TokenStream::SourceCoords::add(uint32_t lineNum, uint32_t lineStartOffset)
         // the line numbers will be wrong, but the code won't crash or anything
         // like that.
         lineStartOffsets_[lineIndex] = lineStartOffset;
-        (void)lineStartOffsets_.append(MAX_PTR);
+
+        uint32_t maxPtr = MAX_PTR;
+        (void)lineStartOffsets_.append(maxPtr);
 
     } else {
         // We have seen this newline before (and ungot it).  Do nothing (other
@@ -262,10 +264,11 @@ TokenStream::SourceCoords::lineNumAndColumnIndex(uint32_t offset, uint32_t *line
 #endif
 
 /* Initialize members that aren't initialized in |init|. */
-TokenStream::TokenStream(JSContext *cx, const CompileOptions &options,
+TokenStream::TokenStream(ExclusiveContext *cx, const CompileOptions &options,
                          const jschar *base, size_t length, StrictModeGetter *smg,
                          AutoKeepAtoms& keepAtoms)
   : srcCoords(cx, options.lineno),
+    options_(options),
     tokens(),
     cursor(),
     lookahead(),
@@ -276,9 +279,7 @@ TokenStream::TokenStream(JSContext *cx, const CompileOptions &options,
     userbuf(cx, base - options.column, length + options.column), // See comment below
     filename(options.filename),
     sourceMap(NULL),
-    listenerTSData(),
     tokenbuf(cx),
-    version(options.version),
     cx(cx),
     originPrincipals(JSScript::normalizeOriginPrincipals(options.principals,
                                                          options.originPrincipals)),
@@ -287,20 +288,15 @@ TokenStream::TokenStream(JSContext *cx, const CompileOptions &options,
     linebaseSkip(cx, &linebase),
     prevLinebaseSkip(cx, &prevLinebase)
 {
+    // The caller must ensure that a reference is held on the supplied principals
+    // throughout compilation.
+    JS_ASSERT_IF(originPrincipals, originPrincipals->refcount);
+
     // Column numbers are computed as offsets from the current line's base, so the
     // initial line's base must be included in the buffer. linebase and userbuf
     // were adjusted above, and if we are starting tokenization part way through
     // this line then adjust the next character.
     userbuf.setAddressOfNextRawChar(base);
-
-    if (originPrincipals)
-        JS_HoldPrincipals(originPrincipals);
-
-    JSSourceHandler listener = cx->runtime()->debugHooks.sourceHandler;
-    void *listenerData = cx->runtime()->debugHooks.sourceHandlerData;
-
-    if (listener)
-        listener(options.filename, options.lineno, base, length, &listenerTSData, listenerData);
 
     /*
      * This table holds all the token kinds that satisfy these properties:
@@ -344,6 +340,15 @@ TokenStream::TokenStream(JSContext *cx, const CompileOptions &options,
     maybeStrSpecial[unsigned(LINE_SEPARATOR & 0xff)] = true;
     maybeStrSpecial[unsigned(PARA_SEPARATOR & 0xff)] = true;
     maybeStrSpecial[unsigned(EOF & 0xff)] = true;
+
+    /* See Parser::assignExpr() for an explanation of isExprEnding[]. */
+    memset(isExprEnding, 0, sizeof(isExprEnding));
+    isExprEnding[TOK_COMMA] = 1;
+    isExprEnding[TOK_SEMI]  = 1;
+    isExprEnding[TOK_COLON] = 1;
+    isExprEnding[TOK_RP]    = 1;
+    isExprEnding[TOK_RB]    = 1;
+    isExprEnding[TOK_RC]    = 1;
 }
 
 #ifdef _MSC_VER
@@ -354,8 +359,8 @@ TokenStream::~TokenStream()
 {
     if (sourceMap)
         js_free(sourceMap);
-    if (originPrincipals)
-        JS_DropPrincipals(cx->runtime(), originPrincipals);
+
+    JS_ASSERT_IF(originPrincipals, originPrincipals->refcount);
 }
 
 /* Use the fastest available getc. */
@@ -583,7 +588,7 @@ TokenStream::reportStrictModeErrorNumberVA(uint32_t offset, bool strictMode, uns
     unsigned flags = JSREPORT_STRICT;
     if (strictMode)
         flags |= JSREPORT_ERROR;
-    else if (cx->hasExtraWarningsOption())
+    else if (options().extraWarningsOption)
         flags |= JSREPORT_WARNING;
     else
         return true;
@@ -649,10 +654,15 @@ TokenStream::reportCompileErrorNumberVA(uint32_t offset, unsigned flags, unsigne
 {
     bool warning = JSREPORT_IS_WARNING(flags);
 
-    if (warning && cx->hasWErrorOption()) {
+    if (warning && options().werrorOption) {
         flags &= ~JSREPORT_WARNING;
         warning = false;
     }
+
+    if (!this->cx->isJSContext())
+        return warning;
+
+    JSContext *cx = this->cx->asJSContext();
 
     CompileError err(cx);
 
@@ -762,7 +772,7 @@ TokenStream::reportWarning(unsigned errorNumber, ...)
 bool
 TokenStream::reportStrictWarningErrorNumberVA(uint32_t offset, unsigned errorNumber, va_list args)
 {
-    if (!cx->hasExtraWarningsOption())
+    if (!options().extraWarningsOption)
         return true;
 
     return reportCompileErrorNumberVA(offset, JSREPORT_STRICT|JSREPORT_WARNING, errorNumber, args);
@@ -903,7 +913,7 @@ TokenStream::newToken(ptrdiff_t adjust)
 }
 
 JS_ALWAYS_INLINE JSAtom *
-TokenStream::atomize(JSContext *cx, CharBuffer &cb)
+TokenStream::atomize(ExclusiveContext *cx, CharBuffer &cb)
 {
     return AtomizeChars<CanGC>(cx, cb.begin(), cb.length());
 }
@@ -993,7 +1003,7 @@ enum FirstCharKind {
     Dec,
     Colon,
     Plus,
-    HexOct,
+    BasePrefix,
 
     /* These two must be last, so that |c >= Space| matches both. */
     Space,
@@ -1012,7 +1022,7 @@ enum FirstCharKind {
  * Dec:     49..57: '1'..'9'
  * Colon:   58: ':'
  * Plus:    43: '+'
- * HexOct:  48: '0'
+ * BasePrefix:  48: '0'
  * Space:   9, 11, 12: '\t', '\v', '\f'
  * EOL:     10, 13: '\n', '\r'
  */
@@ -1022,7 +1032,7 @@ static const uint8_t firstCharKinds[] = {
 /*  10+ */     EOL,   Space,   Space,     EOL, _______, _______, _______, _______, _______, _______,
 /*  20+ */ _______, _______, _______, _______, _______, _______, _______, _______, _______, _______,
 /*  30+ */ _______, _______,   Space, _______,  String, _______,   Ident, _______, _______,  String,
-/*  40+ */ OneChar, OneChar, _______,    Plus, OneChar, _______,     Dot, _______,  HexOct,     Dec,
+/*  40+ */ OneChar, OneChar, _______,    Plus, OneChar, _______,     Dot, _______, BasePrefix,  Dec,
 /*  50+ */     Dec,     Dec,     Dec,     Dec,     Dec,     Dec,     Dec,     Dec,   Colon, OneChar,
 /*  60+ */ _______,  Equals, _______, OneChar, _______,   Ident,   Ident,   Ident,   Ident,   Ident,
 /*  70+ */   Ident,   Ident,   Ident,   Ident,   Ident,   Ident,   Ident,   Ident,   Ident,   Ident,
@@ -1387,10 +1397,8 @@ TokenStream::getTokenInternal()
         goto out;
     }
 
-    /*
-     * Look for a hexadecimal or octal number.
-     */
-    if (c1kind == HexOct) {
+    // Look for a hexadecimal, octal, or binary number.
+    if (c1kind == BasePrefix) {
         int radix;
         c = getCharIgnoreEOL();
         if (c == 'x' || c == 'X') {
@@ -1403,6 +1411,28 @@ TokenStream::getTokenInternal()
             }
             numStart = userbuf.addressOfNextRawChar() - 1;  /* one past the '0x' */
             while (JS7_ISHEX(c))
+                c = getCharIgnoreEOL();
+        } else if (c == 'b' || c == 'B') {
+            radix = 2;
+            c = getCharIgnoreEOL();
+            if (c != '0' && c != '1') {
+                ungetCharIgnoreEOL(c);
+                reportError(JSMSG_MISSING_BINARY_DIGITS);
+                goto error;
+            }
+            numStart = userbuf.addressOfNextRawChar() - 1;  /* one past the '0b' */
+            while (c == '0' || c == '1')
+                c = getCharIgnoreEOL();
+        } else if (c == 'o' || c == 'O') {
+            radix = 8;
+            c = getCharIgnoreEOL();
+            if (c < '0' || c > '7') {
+                ungetCharIgnoreEOL(c);
+                reportError(JSMSG_MISSING_OCTAL_DIGITS);
+                goto error;
+            }
+            numStart = userbuf.addressOfNextRawChar() - 1;  /* one past the '0o' */
+            while ('0' <= c && c <= '7')
                 c = getCharIgnoreEOL();
         } else if (JS7_ISDEC(c)) {
             radix = 8;

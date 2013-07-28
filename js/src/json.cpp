@@ -9,6 +9,7 @@
 #include "mozilla/FloatingPoint.h"
 
 #include <string.h>
+
 #include "jsapi.h"
 #include "jsarray.h"
 #include "jsatom.h"
@@ -199,7 +200,7 @@ PreprocessValue(JSContext *cx, HandleObject holder, KeyType key, MutableHandleVa
 
             args.setCallee(toJSON);
             args.setThis(vp);
-            args[0] = StringValue(keyStr);
+            args[0].setString(keyStr);
 
             if (!Invoke(cx, args))
                 return false;
@@ -221,8 +222,8 @@ PreprocessValue(JSContext *cx, HandleObject holder, KeyType key, MutableHandleVa
 
         args.setCallee(ObjectValue(*scx->replacer));
         args.setThis(ObjectValue(*holder));
-        args[0] = StringValue(keyStr);
-        args[1] = vp;
+        args[0].setString(keyStr);
+        args[1].set(vp);
 
         if (!Invoke(cx, args))
             return false;
@@ -634,7 +635,7 @@ js_Stringify(JSContext *cx, MutableHandleValue vp, JSObject *replacer_, Value sp
     }
 
     /* Step 9. */
-    RootedObject wrapper(cx, NewBuiltinClassInstance(cx, &ObjectClass));
+    RootedObject wrapper(cx, NewBuiltinClassInstance(cx, &JSObject::class_));
     if (!wrapper)
         return false;
 
@@ -672,7 +673,7 @@ Walk(JSContext *cx, HandleObject holder, HandleId name, HandleValue reviver, Mut
         RootedObject obj(cx, &val.toObject());
 
         /* 'val' must have been produced by the JSON parser, so not a proxy. */
-        JS_ASSERT(!obj->isProxy());
+        JS_ASSERT(!obj->is<ProxyObject>());
         if (obj->is<ArrayObject>()) {
             /* Step 2a(ii). */
             uint32_t length = obj->as<ArrayObject>().length();
@@ -746,8 +747,8 @@ Walk(JSContext *cx, HandleObject holder, HandleId name, HandleValue reviver, Mut
 
     args.setCallee(reviver);
     args.setThis(ObjectValue(*holder));
-    args[0] = StringValue(key);
-    args[1] = val;
+    args[0].setString(key);
+    args[1].set(val);
 
     if (!Invoke(cx, args))
         return false;
@@ -758,7 +759,7 @@ Walk(JSContext *cx, HandleObject holder, HandleId name, HandleValue reviver, Mut
 static bool
 Revive(JSContext *cx, HandleValue reviver, MutableHandleValue vp)
 {
-    RootedObject obj(cx, NewBuiltinClassInstance(cx, &ObjectClass));
+    RootedObject obj(cx, NewBuiltinClassInstance(cx, &JSObject::class_));
     if (!obj)
         return false;
 
@@ -801,7 +802,7 @@ js_json_parse(JSContext *cx, unsigned argc, Value *vp)
 
     /* Step 1. */
     JSString *str = (args.length() >= 1)
-                    ? ToString<CanGC>(cx, args.handleAt(0))
+                    ? ToString<CanGC>(cx, args[0])
                     : cx->names().undefined;
     if (!str)
         return false;

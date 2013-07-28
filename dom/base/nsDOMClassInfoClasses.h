@@ -5,7 +5,6 @@
 
 DOMCI_CLASS(Window)
 DOMCI_CLASS(Location)
-DOMCI_CLASS(Navigator)
 DOMCI_CLASS(History)
 DOMCI_CLASS(DOMPrototype)
 DOMCI_CLASS(DOMConstructor)
@@ -96,7 +95,6 @@ DOMCI_CLASS(ModalContentWindow)
 DOMCI_CLASS(MozPowerManager)
 DOMCI_CLASS(MozWakeLock)
 
-DOMCI_CLASS(MozSmsManager)
 DOMCI_CLASS(MozMobileMessageManager)
 DOMCI_CLASS(MozSmsMessage)
 DOMCI_CLASS(MozMmsMessage)

@@ -413,6 +413,30 @@ GetNativeForGlobal(JSObject *global);
  */
 JSObject *
 GetJunkScope();
+
+/**
+ * Returns the native global of the junk scope. See comment of GetJunkScope
+ * about the conditions of using it.
+ */
+nsIGlobalObject *
+GetJunkScopeGlobal();
+
+// Error reporter used when there is no associated DOM window on to which to
+// report errors and warnings.
+void
+SystemErrorReporter(JSContext *cx, const char *message, JSErrorReport *rep);
+
+// We have a separate version that's exported with external linkage for use by
+// xpcshell, since external linkage on windows changes the signature to make it
+// incompatible with the JSErrorReporter type, causing JS_SetErrorReporter calls
+// to fail to compile.
+NS_EXPORT_(void)
+SystemErrorReporterExternal(JSContext *cx, const char *message,
+                            JSErrorReport *rep);
+
+NS_EXPORT_(void)
+SimulateActivityCallback(bool aActive);
+
 } // namespace xpc
 
 namespace mozilla {
@@ -453,6 +477,12 @@ extern bool
 DefineStaticJSVals(JSContext *cx);
 void
 Register(nsScriptNameSpaceManager* aNameSpaceManager);
+
+/**
+ * A test for whether WebIDL methods that should only be visible to
+ * chrome or XBL scopes should be exposed.
+ */
+bool IsChromeOrXBL(JSContext* cx, JSObject* /* unused */);
 
 } // namespace dom
 } // namespace mozilla

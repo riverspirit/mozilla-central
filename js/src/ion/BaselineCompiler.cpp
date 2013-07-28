@@ -4,17 +4,15 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#include "ion/BaselineJIT.h"
-#include "ion/BaselineIC.h"
-#include "ion/BaselineHelpers.h"
 #include "ion/BaselineCompiler.h"
+
+#include "ion/BaselineHelpers.h"
+#include "ion/BaselineIC.h"
+#include "ion/BaselineJIT.h"
 #include "ion/FixedList.h"
 #include "ion/IonLinker.h"
 #include "ion/IonSpewer.h"
 #include "ion/VMFunctions.h"
-#include "ion/IonFrames-inl.h"
-
-#include "jsopcodeinlines.h"
 
 #include "vm/Interpreter-inl.h"
 
@@ -86,6 +84,7 @@ BaselineCompiler::compile()
     MethodStatus status = emitBody();
     if (status != Method_Compiled)
         return status;
+
 
     if (!emitEpilogue())
         return Method_Error;
@@ -227,6 +226,11 @@ BaselineCompiler::emitPrologue()
             masm.pushValue(R0);
     }
 
+#if JS_TRACE_LOGGING
+    masm.tracelogStart(script.get());
+    masm.tracelogLog(TraceLogging::INFO_ENGINE_BASELINE);
+#endif
+
     // Record the offset of the prologue, because Ion can bailout before
     // the scope chain is initialized.
     prologueOffset_ = masm.currentOffset();
@@ -258,6 +262,10 @@ bool
 BaselineCompiler::emitEpilogue()
 {
     masm.bind(&return_);
+
+#if JS_TRACE_LOGGING
+    masm.tracelogStop();
+#endif
 
     // Pop SPS frame if necessary
     emitSPSPop();
@@ -1413,7 +1421,7 @@ BaselineCompiler::emit_JSOP_NEWINIT()
         JS_ASSERT(key == JSProto_Object);
 
         RootedObject templateObject(cx);
-        templateObject = NewBuiltinClassInstance(cx, &ObjectClass, TenuredObject);
+        templateObject = NewBuiltinClassInstance(cx, &JSObject::class_, TenuredObject);
         if (!templateObject)
             return false;
 
@@ -2181,7 +2189,7 @@ BaselineCompiler::emit_JSOP_SETARG()
 bool
 BaselineCompiler::emitCall()
 {
-    JS_ASSERT(js_CodeSpec[*pc].format & JOF_INVOKE);
+    JS_ASSERT(IsCallPC(pc));
 
     uint32_t argc = GET_ARGC(pc);
 

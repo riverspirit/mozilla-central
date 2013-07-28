@@ -9,8 +9,9 @@
 /*
  * JS function definitions.
  */
-#include "jsprvtd.h"
+
 #include "jsobj.h"
+#include "jsprvtd.h"
 #include "jsscript.h"
 
 #include "gc/Barrier.h"
@@ -142,6 +143,9 @@ class JSFunction : public JSObject
     bool isNamedLambda() const {
         return isLambda() && atom_ && !hasGuessedAtom();
     }
+    bool hasParallelNative() const {
+        return isNative() && jitInfo() && !!jitInfo()->parallelNative;
+    }
 
     bool isBuiltinFunctionConstructor();
 
@@ -256,7 +260,7 @@ class JSFunction : public JSObject
 
     JSScript *nonLazyScript() const {
         JS_ASSERT(hasScript());
-        return JS::HandleScript::fromMarkedLocation(&u.i.s.script_);
+        return u.i.s.script_;
     }
 
     js::HeapPtrScript &mutableScript() {
@@ -290,6 +294,15 @@ class JSFunction : public JSObject
 
     JSNative maybeNative() const {
         return isInterpreted() ? NULL : native();
+    }
+
+    JSParallelNative parallelNative() const {
+        JS_ASSERT(hasParallelNative());
+        return jitInfo()->parallelNative;
+    }
+
+    JSParallelNative maybeParallelNative() const {
+        return hasParallelNative() ? parallelNative() : NULL;
     }
 
     void initNative(js::Native native, const JSJitInfo *jitinfo) {
@@ -356,7 +369,7 @@ class JSFunction : public JSObject
     inline const js::Value &getExtendedSlot(size_t which) const;
 
     /* Constructs a new type for the function if necessary. */
-    static bool setTypeForScriptedFunction(JSContext *cx, js::HandleFunction fun,
+    static bool setTypeForScriptedFunction(js::ExclusiveContext *cx, js::HandleFunction fun,
                                            bool singleton = false);
 
     /* GC support. */
@@ -386,7 +399,7 @@ extern JSBool
 Function(JSContext *cx, unsigned argc, Value *vp);
 
 extern JSFunction *
-NewFunction(JSContext *cx, HandleObject funobj, JSNative native, unsigned nargs,
+NewFunction(ExclusiveContext *cx, HandleObject funobj, JSNative native, unsigned nargs,
             JSFunction::Flags flags, HandleObject parent, HandleAtom atom,
             gc::AllocKind allocKind = JSFunction::FinalizeKind,
             NewObjectKind newKind = GenericObject);
@@ -396,6 +409,10 @@ DefineFunction(JSContext *cx, HandleObject obj, HandleId id, JSNative native,
                unsigned nargs, unsigned flags,
                gc::AllocKind allocKind = JSFunction::FinalizeKind,
                NewObjectKind newKind = GenericObject);
+
+extern JSBool
+fun_resolve(JSContext *cx, js::HandleObject obj, js::HandleId id,
+            unsigned flags, js::MutableHandleObject objp);
 
 // ES6 9.2.5 IsConstructor
 bool IsConstructor(const Value &v);

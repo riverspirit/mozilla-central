@@ -384,6 +384,22 @@ nsLayoutUtils::AnimatedImageLayersEnabled()
   return sAnimatedImageLayersEnabled;
 }
 
+bool
+nsLayoutUtils::CSSFiltersEnabled()
+{
+  static bool sCSSFiltersEnabled;
+  static bool sCSSFiltersPrefCached = false;
+
+  if (!sCSSFiltersPrefCached) {
+    sCSSFiltersPrefCached = true;
+    Preferences::AddBoolVarCache(&sCSSFiltersEnabled,
+                                 "layout.css.filters.enabled",
+                                 false);
+  }
+
+  return sCSSFiltersEnabled;
+}
+
 void
 nsLayoutUtils::UnionChildOverflow(nsIFrame* aFrame,
                                   nsOverflowAreas& aOverflowAreas)
@@ -2556,6 +2572,15 @@ GetPercentHeight(const nsStyleCoord& aStyle,
   if (!f) {
     NS_NOTREACHED("top of frame tree not a containing block");
     return false;
+  }
+
+  // During reflow, nsHTMLScrollFrame::ReflowScrolledFrame uses
+  // SetComputedHeight on the reflow state for its child to propagate its
+  // computed height to the scrolled content. So here we skip to the scroll
+  // frame that contains this scrolled content in order to get the same
+  // behavior as layout when computing percentage heights.
+  if (f->StyleContext()->GetPseudo() == nsCSSAnonBoxes::scrolledContent) {
+    f = f->GetParent();
   }
 
   const nsStylePosition *pos = f->StylePosition();
@@ -5067,7 +5092,7 @@ nsLayoutUtils::PostRestyleEvent(Element* aElement,
   if (doc) {
     nsCOMPtr<nsIPresShell> presShell = doc->GetShell();
     if (presShell) {
-      presShell->FrameConstructor()->PostRestyleEvent(
+      presShell->GetPresContext()->RestyleManager()->PostRestyleEvent(
         aElement, aRestyleHint, aMinChangeHint);
     }
   }

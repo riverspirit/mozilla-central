@@ -5,6 +5,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "ion/TypePolicy.h"
+
 #include "ion/MIR.h"
 #include "ion/MIRGraph.h"
 
@@ -24,7 +25,7 @@ BoxInputsPolicy::boxAt(MInstruction *at, MDefinition *operand)
 bool
 BoxInputsPolicy::adjustInputs(MInstruction *ins)
 {
-    for (size_t i = 0; i < ins->numOperands(); i++) {
+    for (size_t i = 0, e = ins->numOperands(); i < e; i++) {
         MDefinition *in = ins->getOperand(i);
         if (in->type() == MIRType_Value)
             continue;
@@ -41,7 +42,7 @@ ArithPolicy::adjustInputs(MInstruction *ins)
 
     JS_ASSERT(ins->type() == MIRType_Double || ins->type() == MIRType_Int32);
 
-    for (size_t i = 0; i < ins->numOperands(); i++) {
+    for (size_t i = 0, e = ins->numOperands(); i < e; i++) {
         MDefinition *in = ins->getOperand(i);
         if (in->type() == ins->type())
             continue;
@@ -258,7 +259,7 @@ BitwisePolicy::adjustInputs(MInstruction *ins)
     JS_ASSERT(specialization_ == MIRType_Int32 || specialization_ == MIRType_Double);
 
     // This policy works for both unary and binary bitwise operations.
-    for (size_t i = 0; i < ins->numOperands(); i++) {
+    for (size_t i = 0, e = ins->numOperands(); i < e; i++) {
         MDefinition *in = ins->getOperand(i);
         if (in->type() == MIRType_Int32)
             continue;
@@ -323,6 +324,9 @@ IntPolicy<Op>::staticAdjustInputs(MInstruction *def)
     MDefinition *in = def->getOperand(Op);
     if (in->type() == MIRType_Int32)
         return true;
+
+    if (in->type() != MIRType_Value)
+        in = boxAt(def, in);
 
     MUnbox *replace = MUnbox::New(in, MIRType_Int32, MUnbox::Fallible);
     def->block()->insertBefore(def, replace);
@@ -442,7 +446,7 @@ CallSetElementPolicy::adjustInputs(MInstruction *ins)
     SingleObjectPolicy::adjustInputs(ins);
 
     // Box the index and value operands.
-    for (size_t i = 1; i < ins->numOperands(); i++) {
+    for (size_t i = 1, e = ins->numOperands(); i < e; i++) {
         MDefinition *in = ins->getOperand(i);
         if (in->type() == MIRType_Value)
             continue;
@@ -562,9 +566,9 @@ bool
 StoreTypedArrayElementStaticPolicy::adjustInputs(MInstruction *ins)
 {
     MStoreTypedArrayElementStatic *store = ins->toStoreTypedArrayElementStatic();
-    JS_ASSERT(store->ptr()->type() == MIRType_Int32);
 
-    return adjustValueInput(ins, store->viewType(), store->value(), 1);
+    return IntPolicy<0>::staticAdjustInputs(ins) &&
+        adjustValueInput(ins, store->viewType(), store->value(), 1);
 }
 
 bool

@@ -45,9 +45,11 @@
 #include "nsContentUtils.h"
 #include "nsIPermissionManager.h"
 #include "nsIPrincipal.h"
+#include "nsISecurityConsoleMessage.h"
 #include "nsIScriptSecurityManager.h"
 #include "nsISSLStatus.h"
 #include "nsISSLStatusProvider.h"
+#include "nsIDOMWindow.h"
 
 namespace mozilla { namespace net {
 
@@ -1194,8 +1196,9 @@ nsHttpChannel::ProcessSTSHeader()
 
     rv = stss->ProcessStsHeader(mURI, stsHeader.get(), flags, NULL, NULL);
     if (NS_FAILED(rv)) {
+        AddSecurityMessage(NS_LITERAL_STRING("InvalidSTSHeaders"),
+                NS_LITERAL_STRING("Invalid HSTS Headers"));
         LOG(("STS: Failed to parse STS header, continuing load.\n"));
-        return NS_OK;
     }
 
     return NS_OK;
@@ -2546,6 +2549,12 @@ nsHttpChannel::OpenCacheEntry(bool usingSSL)
                 (cacheKey, loadContext, getter_AddRefs(mApplicationCache));
             NS_ENSURE_SUCCESS(rv, rv);
         }
+    }
+
+    if (mLoadFlags & LOAD_INITIAL_DOCUMENT_URI) {
+        mozilla::Telemetry::Accumulate(
+            Telemetry::HTTP_OFFLINE_CACHE_DOCUMENT_LOAD,
+            !!mApplicationCache);
     }
 
     nsCOMPtr<nsICacheSession> session;

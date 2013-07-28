@@ -319,7 +319,9 @@ pref("gfx.content.azure.enabled", true);
 #else
 pref("gfx.content.azure.enabled", false);
 #ifdef XP_MACOSX
+pref("gfx.content.azure.backends", "cg");
 pref("gfx.canvas.azure.backends", "cg");
+pref("gfx.content.azure.enabled", true);
 // Accelerated cg canvas where available (10.7+)
 pref("gfx.canvas.azure.accelerated", false);
 #else
@@ -451,6 +453,9 @@ pref("devtools.debugger.remote-enabled", false);
 pref("devtools.debugger.remote-port", 6000);
 // Force debugger server binding on the loopback interface
 pref("devtools.debugger.force-local", true);
+
+// Temporary setting to enable webapps actors
+pref("devtools.debugger.enable-content-actors", false);
 
 // view source
 pref("view_source.syntax_highlight", true);
@@ -864,6 +869,12 @@ pref("security.fileuri.strict_origin_policy", true);
 // telemetry is also enabled as otherwise there is no way to report
 // the results
 pref("network.allow-experiments", true);
+
+// Transmit UDP busy-work to the LAN when anticipating low latency
+// network reads and on wifi to mitigate 802.11 Power Save Polling delays
+pref("network.tickle-wifi.enabled", false);
+pref("network.tickle-wifi.duration", 400);
+pref("network.tickle-wifi.delay", 16);
 
 // Turn off interprocess security checks. Needed to run xpcshell tests.
 pref("network.disable.ipc.security", false);
@@ -1766,6 +1777,9 @@ pref("layout.css.masking.enabled", true);
 // Is support for the the @supports rule enabled?
 pref("layout.css.supports-rule.enabled", true);
 
+// Is support for CSS Filters enabled?
+pref("layout.css.filters.enabled", false);
+
 // Is support for CSS Flexbox enabled?
 pref("layout.css.flexbox.enabled", true);
 
@@ -1842,17 +1856,18 @@ pref("gestures.enable_single_finger_input", true);
 pref("editor.resizing.preserve_ratio",       true);
 pref("editor.positioning.offset",            0);
 
+pref("dom.use_watchdog", true);
 pref("dom.max_chrome_script_run_time", 20);
 pref("dom.max_script_run_time", 10);
 
 // If true, ArchiveReader will be enabled
 pref("dom.archivereader.enabled", false);
 
-// If true, Future will be enabled
+// If true, Promise will be enabled
 #ifdef RELEASE_BUILD
-pref("dom.future.enabled", false);
+pref("dom.promise.enabled", false);
 #else
-pref("dom.future.enabled", true);
+pref("dom.promise.enabled", true);
 #endif
 
 // Hang monitor timeout after which we kill the browser, in seconds
@@ -1928,6 +1943,14 @@ pref("svg.display-lists.painting.enabled", true);
 pref("svg.paint-order.enabled", false);
 #else
 pref("svg.paint-order.enabled", true);
+#endif
+
+// Is support for the new marker features from SVG 2 enabled?  Currently
+// this just includes <marker orient="auto-start-reverse">.
+#ifdef RELEASE_BUILD
+pref("svg.marker-improvements.enabled", false);
+#else
+pref("svg.marker-improvements.enabled", true);
 #endif
 
 // Is support for the new SVG text implementation enabled?
@@ -4159,7 +4182,6 @@ pref("dom.mozNetworkStats.enabled", false);
 
 // WebSettings
 pref("dom.mozSettings.enabled", false);
-pref("dom.navigator-property.disable.mozSettings", true);
 pref("dom.mozPermissionSettings.enabled", false);
 
 // W3C touch events

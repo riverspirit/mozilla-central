@@ -4,15 +4,16 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#include "ion/MIRGraph.h"
+
 #include "jsanalyze.h"
 
 #include "ion/Ion.h"
+#include "ion/IonBuilder.h"
 #include "ion/IonSpewer.h"
 #include "ion/MIR.h"
-#include "ion/MIRGraph.h"
-#include "ion/IonBuilder.h"
+
 #include "jsinferinlines.h"
-#include "jsscriptinlines.h"
 
 using namespace js;
 using namespace js::ion;
@@ -124,35 +125,34 @@ MIRGraph::unmarkBlocks()
 }
 
 MDefinition *
-MIRGraph::parSlice()
+MIRGraph::forkJoinSlice()
 {
     // Search the entry block to find a par slice instruction.  If we do not
     // find one, add one after the Start instruction.
     //
     // Note: the original design used a field in MIRGraph to cache the
-    // parSlice rather than searching for it again.  However, this
-    // could become out of date due to DCE.  Given that we do not
-    // generally have to search very far to find the par slice
-    // instruction if it exists, and that we don't look for it that
-    // often, I opted to simply eliminate the cache and search anew
-    // each time, so that it is that much easier to keep the IR
-    // coherent. - nmatsakis
+    // forkJoinSlice rather than searching for it again.  However, this could
+    // become out of date due to DCE.  Given that we do not generally have to
+    // search very far to find the par slice instruction if it exists, and
+    // that we don't look for it that often, I opted to simply eliminate the
+    // cache and search anew each time, so that it is that much easier to keep
+    // the IR coherent. - nmatsakis
 
     MBasicBlock *entry = entryBlock();
     JS_ASSERT(entry->info().executionMode() == ParallelExecution);
 
     MInstruction *start = NULL;
     for (MInstructionIterator ins(entry->begin()); ins != entry->end(); ins++) {
-        if (ins->isParSlice())
+        if (ins->isForkJoinSlice())
             return *ins;
         else if (ins->isStart())
             start = *ins;
     }
     JS_ASSERT(start);
 
-    MParSlice *parSlice = new MParSlice();
-    entry->insertAfter(start, parSlice);
-    return parSlice;
+    MForkJoinSlice *slice = new MForkJoinSlice();
+    entry->insertAfter(start, slice);
+    return slice;
 }
 
 MBasicBlock *
@@ -216,9 +216,9 @@ MBasicBlock::NewSplitEdge(MIRGraph &graph, CompileInfo &info, MBasicBlock *pred)
 }
 
 MBasicBlock *
-MBasicBlock::NewParBailout(MIRGraph &graph, CompileInfo &info,
-                           MBasicBlock *pred, jsbytecode *entryPc,
-                           MResumePoint *resumePoint)
+MBasicBlock::NewAbortPar(MIRGraph &graph, CompileInfo &info,
+                         MBasicBlock *pred, jsbytecode *entryPc,
+                         MResumePoint *resumePoint)
 {
     MBasicBlock *block = new MBasicBlock(graph, info, entryPc, NORMAL);
 
@@ -231,7 +231,7 @@ MBasicBlock::NewParBailout(MIRGraph &graph, CompileInfo &info,
     if (!block->addPredecessorWithoutPhis(pred))
         return NULL;
 
-    block->end(new MParBailout());
+    block->end(new MAbortPar());
     return block;
 }
 
@@ -620,7 +620,7 @@ void
 MBasicBlock::discard(MInstruction *ins)
 {
     AssertSafelyDiscardable(ins);
-    for (size_t i = 0; i < ins->numOperands(); i++)
+    for (size_t i = 0, e = ins->numOperands(); i < e; i++)
         ins->discardOperand(i);
 
     instructions_.remove(ins);
@@ -630,7 +630,7 @@ MInstructionIterator
 MBasicBlock::discardAt(MInstructionIterator &iter)
 {
     AssertSafelyDiscardable(*iter);
-    for (size_t i = 0; i < iter->numOperands(); i++)
+    for (size_t i = 0, e = iter->numOperands(); i < e; i++)
         iter->discardOperand(i);
 
     return instructions_.removeAt(iter);
@@ -640,7 +640,7 @@ MInstructionReverseIterator
 MBasicBlock::discardAt(MInstructionReverseIterator &iter)
 {
     AssertSafelyDiscardable(*iter);
-    for (size_t i = 0; i < iter->numOperands(); i++)
+    for (size_t i = 0, e = iter->numOperands(); i < e; i++)
         iter->discardOperand(i);
 
     return instructions_.removeAt(iter);
@@ -663,7 +663,7 @@ void
 MBasicBlock::discardAllInstructions()
 {
     for (MInstructionIterator iter = begin(); iter != end(); ) {
-        for (size_t i = 0; i < iter->numOperands(); i++)
+        for (size_t i = 0, e = iter->numOperands(); i < e; i++)
             iter->discardOperand(i);
         iter = instructions_.removeAt(iter);
     }
@@ -675,7 +675,7 @@ MBasicBlock::discardAllPhiOperands()
 {
     for (MPhiIterator iter = phisBegin(); iter != phisEnd(); iter++) {
         MPhi *phi = *iter;
-        for (size_t i = 0; i < phi->numOperands(); i++)
+        for (size_t i = 0, e = phi->numOperands(); i < e; i++)
             phi->discardOperand(i);
     }
 
@@ -754,7 +754,7 @@ MBasicBlock::discardPhiAt(MPhiIterator &at)
 {
     JS_ASSERT(!phis_.empty());
 
-    for (size_t i = 0; i < at->numOperands(); i++)
+    for (size_t i = 0, e = at->numOperands(); i < e; i++)
         at->discardOperand(i);
 
     MPhiIterator result = phis_.removeAt(at);
@@ -1088,7 +1088,9 @@ MIRGraph::dump(FILE *fp)
 {
 #ifdef DEBUG
     for (MBasicBlockIterator iter(begin()); iter != end(); iter++) {
+        fprintf(fp, "block%d:\n", iter->id());
         iter->dump(fp);
+        fprintf(fp, "\n");
     }
 #endif
 }
@@ -1098,12 +1100,10 @@ MBasicBlock::dump(FILE *fp)
 {
 #ifdef DEBUG
     for (MPhiIterator iter(phisBegin()); iter != phisEnd(); iter++) {
-        iter->printOpcode(fp);
-        fprintf(fp, "\n");
+        iter->dump(fp);
     }
     for (MInstructionIterator iter(begin()); iter != end(); iter++) {
-        iter->printOpcode(fp);
-        fprintf(fp, "\n");
+        iter->dump(fp);
     }
 #endif
 }

@@ -207,7 +207,6 @@ pref("extensions.{972ce4c6-7e08-4474-a285-3208198ce6fd}.name", "chrome://browser
 pref("extensions.{972ce4c6-7e08-4474-a285-3208198ce6fd}.description", "chrome://browser/locale/browser.properties");
 
 pref("xpinstall.whitelist.add", "addons.mozilla.org");
-pref("xpinstall.whitelist.add.36", "getpersonas.com");
 pref("xpinstall.whitelist.add.180", "marketplace.firefox.com");
 
 pref("lightweightThemes.update.enabled", true);
@@ -472,6 +471,10 @@ pref("dom.disable_window_status_change",          true);
 pref("dom.disable_window_move_resize",            false);
 // prevent JS from monkeying with window focus, etc
 pref("dom.disable_window_flip",                   true);
+
+// Disable touch events on Desktop Firefox by default until they are properly
+// supported (bug 736048)
+pref("dom.w3c_touch_events.enabled",        0);
 
 // popups.policy 1=allow,2=reject
 pref("privacy.popups.policy",               1);
@@ -760,6 +763,12 @@ pref("browser.safebrowsing.reportMalwareErrorURL", "http://%LOCALE%.malware-erro
 
 pref("browser.safebrowsing.warning.infoURL", "https://www.mozilla.org/%LOCALE%/firefox/phishing-protection/");
 pref("browser.safebrowsing.malware.reportURL", "http://safebrowsing.clients.google.com/safebrowsing/diagnostic?client=%NAME%&hl=%LOCALE%&site=");
+// Since the application reputation query isn't hooked in anywhere yet, this
+// preference does not matter. To be extra safe, don't turn this preference on
+// for official builds without whitelisting (bug 842828).
+#ifndef MOZILLA_OFFICIAL
+pref("browser.safebrowsing.appRepURL", "https://sb-ssl.google.com/safebrowsing/clientreport/download");
+#endif
 
 #ifdef MOZILLA_OFFICIAL
 // Normally the "client ID" sent in updates is appinfo.name, but for
@@ -1274,3 +1283,7 @@ pref("dom.debug.propagate_gesture_events_through_content", false);
 
 // The request URL of the GeoLocation backend.
 pref("geo.wifi.uri", "https://www.googleapis.com/geolocation/v1/geolocate?key=%GOOGLE_API_KEY%");
+
+// Necko IPC security checks only needed for app isolation for cookies/cache/etc:
+// currently irrelevant for desktop e10s
+pref("network.disable.ipc.security", true);

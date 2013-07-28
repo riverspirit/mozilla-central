@@ -8,6 +8,7 @@
 #define gc_Barrier_inl_h
 
 #include "gc/Barrier.h"
+
 #include "gc/Marking.h"
 #include "gc/StoreBuffer.h"
 
@@ -37,7 +38,7 @@ RelocatablePtr<T>::post()
 {
 #ifdef JSGC_GENERATIONAL
     JS_ASSERT(this->value);
-    this->value->runtime()->gcStoreBuffer.putRelocatableCell((gc::Cell **)&this->value);
+    T::writeBarrierPostRelocate(this->value, &this->value);
 #endif
 }
 
@@ -46,7 +47,7 @@ inline void
 RelocatablePtr<T>::relocate(JSRuntime *rt)
 {
 #ifdef JSGC_GENERATIONAL
-    rt->gcStoreBuffer.removeRelocatableCell((gc::Cell **)&this->value);
+    T::writeBarrierPostRemove(this->value, &this->value);
 #endif
 }
 

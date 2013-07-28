@@ -4,11 +4,12 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#include "ion/IonFrames.h"
+#include "ion/IonFrames-inl.h"
 
+#include "jsfun.h"
 #include "jsobj.h"
 #include "jsscript.h"
-#include "jsfun.h"
+
 #include "gc/Marking.h"
 #include "ion/BaselineFrame.h"
 #include "ion/BaselineIC.h"
@@ -25,7 +26,6 @@
 #include "jsfuninlines.h"
 
 #include "ion/IonFrameIterator-inl.h"
-#include "ion/IonFrames-inl.h"
 #include "vm/Probes-inl.h"
 
 namespace js {
@@ -586,8 +586,9 @@ HandleParallelFailure(ResumeFromException *rfe)
     ForkJoinSlice *slice = ForkJoinSlice::Current();
     IonFrameIterator iter(slice->perThreadData->ionTop);
 
+    parallel::Spew(parallel::SpewBailouts, "Bailing from VM reentry");
+
     while (!iter.isEntry()) {
-        parallel::Spew(parallel::SpewBailouts, "Bailing from VM reentry");
         if (iter.isScripted()) {
             slice->bailoutRecord->setCause(ParallelBailoutFailedIC,
                                            iter.script(), iter.script(), NULL);
@@ -598,7 +599,7 @@ HandleParallelFailure(ResumeFromException *rfe)
 
     while (!iter.isEntry()) {
         if (iter.isScripted())
-            PropagateParallelAbort(iter.script(), iter.script());
+            PropagateAbortPar(iter.script(), iter.script());
         ++iter;
     }
 
@@ -1048,6 +1049,15 @@ GetPcScript(JSContext *cx, JSScript **scriptRes, jsbytecode **pcRes)
     // Recover the return address.
     IonFrameIterator it(rt->mainThread.ionTop);
 
+    // If the previous frame is a rectifier frame (maybe unwound),
+    // skip past it.
+    if (it.prevType() == IonFrame_Rectifier || it.prevType() == IonFrame_Unwound_Rectifier) {
+        ++it;
+        JS_ASSERT(it.prevType() == IonFrame_BaselineStub ||
+                  it.prevType() == IonFrame_BaselineJS ||
+                  it.prevType() == IonFrame_OptimizedJS);
+    }
+
     // If the previous frame is a stub frame, skip the exit frame so that
     // returnAddress below gets the return address into the BaselineJS
     // frame.
@@ -1303,7 +1313,7 @@ InlineFrameIteratorMaybeGC<allowGC>::findNextFrame()
     // before reading inner ones.
     unsigned remaining = start_.frameCount() - framesRead_ - 1;
     for (unsigned i = 0; i < remaining; i++) {
-        JS_ASSERT(js_CodeSpec[*pc_].format & JOF_INVOKE);
+        JS_ASSERT(IsIonInlinablePC(pc_));
 
         // Recover the number of actual arguments from the script.
         if (JSOp(*pc_) != JSOP_FUNAPPLY)
@@ -1311,6 +1321,10 @@ InlineFrameIteratorMaybeGC<allowGC>::findNextFrame()
         if (JSOp(*pc_) == JSOP_FUNCALL) {
             JS_ASSERT(GET_ARGC(pc_) > 0);
             numActualArgs_ = GET_ARGC(pc_) - 1;
+        } else if (IsGetterPC(pc_)) {
+            numActualArgs_ = 0;
+        } else if (IsSetterPC(pc_)) {
+            numActualArgs_ = 1;
         }
 
         JS_ASSERT(numActualArgs_ != 0xbadbad);
@@ -1380,7 +1394,7 @@ InlineFrameIteratorMaybeGC<allowGC>::isConstructing() const
             return false;
 
         // In the case of a JS frame, look up the pc from the snapshot.
-        JS_ASSERT(js_CodeSpec[*parent.pc()].format & JOF_INVOKE);
+        JS_ASSERT(IsCallPC(parent.pc()));
 
         return (JSOp)*parent.pc() == JSOP_NEW;
     }
@@ -1408,7 +1422,7 @@ IonFrameIterator::isConstructing() const
         if (IsGetterPC(inlinedParent.pc()) || IsSetterPC(inlinedParent.pc()))
             return false;
 
-        JS_ASSERT(js_CodeSpec[*inlinedParent.pc()].format & JOF_INVOKE);
+        JS_ASSERT(IsCallPC(inlinedParent.pc()));
 
         return (JSOp)*inlinedParent.pc() == JSOP_NEW;
     }
@@ -1421,7 +1435,7 @@ IonFrameIterator::isConstructing() const
         if (IsGetterPC(pc) || IsSetterPC(pc))
             return false;
 
-        JS_ASSERT(js_CodeSpec[*pc].format & JOF_INVOKE);
+        JS_ASSERT(IsCallPC(pc));
 
         return JSOp(*pc) == JSOP_NEW;
     }

@@ -5,10 +5,9 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "ion/x64/Assembler-x64.h"
+
 #include "gc/Marking.h"
 #include "ion/LIR.h"
-
-#include "jsscriptinlines.h"
 
 using namespace js;
 using namespace js::ion;

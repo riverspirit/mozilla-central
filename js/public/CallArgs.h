@@ -45,6 +45,29 @@ class JSObject;
 typedef JSBool
 (* JSNative)(JSContext *cx, unsigned argc, JS::Value *vp);
 
+/* Typedef for native functions that may be called in parallel. */
+typedef js::ParallelResult
+(* JSParallelNative)(js::ForkJoinSlice *slice, unsigned argc, JS::Value *vp);
+
+/*
+ * Typedef for native functions that may be called either in parallel or
+ * sequential execution.
+ */
+typedef JSBool
+(* JSThreadSafeNative)(js::ThreadSafeContext *cx, unsigned argc, JS::Value *vp);
+
+/*
+ * Convenience wrappers for passing in ThreadSafeNative to places that expect
+ * a JSNative or a JSParallelNative.
+ */
+template <JSThreadSafeNative threadSafeNative>
+inline JSBool
+JSNativeThreadSafeWrapper(JSContext *cx, unsigned argc, JS::Value *vp);
+
+template <JSThreadSafeNative threadSafeNative>
+inline js::ParallelResult
+JSParallelNativeThreadSafeWrapper(js::ForkJoinSlice *slice, unsigned argc, JS::Value *vp);
+
 /*
  * Compute |this| for the |vp| inside a JSNative, either boxing primitives or
  * replacing with the global object as necessary.
@@ -294,13 +317,7 @@ class MOZ_STACK_CLASS CallArgsBase :
     unsigned length() const { return argc_; }
 
     /* Returns the i-th zero-indexed argument. */
-    Value &operator[](unsigned i) const {
-        MOZ_ASSERT(i < argc_);
-        return this->argv_[i];
-    }
-
-    /* Returns a mutable handle for the i-th zero-indexed argument. */
-    MutableHandleValue handleAt(unsigned i) const {
+    MutableHandleValue operator[](unsigned i) const {
         MOZ_ASSERT(i < argc_);
         return MutableHandleValue::fromMarkedLocation(&this->argv_[i]);
     }
@@ -309,15 +326,7 @@ class MOZ_STACK_CLASS CallArgsBase :
      * Returns the i-th zero-indexed argument, or |undefined| if there's no
      * such argument.
      */
-    Value get(unsigned i) const {
-        return i < length() ? this->argv_[i] : UndefinedValue();
-    }
-
-    /*
-     * Returns the i-th zero-indexed argument as a handle, or |undefined| if
-     * there's no such argument.
-     */
-    HandleValue handleOrUndefinedAt(unsigned i) const {
+    HandleValue get(unsigned i) const {
         return i < length()
                ? HandleValue::fromMarkedLocation(&this->argv_[i])
                : UndefinedHandleValue;

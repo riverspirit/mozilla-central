@@ -511,20 +511,25 @@ var SelectionHelperUI = {
     messageManager.addMessageListener("Content:HandlerShutdown", this);
     messageManager.addMessageListener("Content:SelectionHandlerPong", this);
 
+    // capture phase
     window.addEventListener("keypress", this, true);
-    window.addEventListener("click", this, false);
-    window.addEventListener("touchstart", this, true);
-    window.addEventListener("touchend", this, true);
-    window.addEventListener("touchmove", this, true);
     window.addEventListener("MozPrecisePointer", this, true);
     window.addEventListener("MozDeckOffsetChanging", this, true);
     window.addEventListener("MozDeckOffsetChanged", this, true);
+    window.addEventListener("KeyboardChanged", this, true);
+
+    // bubble phase
+    window.addEventListener("click", this, false);
+    window.addEventListener("touchstart", this, false);
+    window.addEventListener("touchend", this, false);
+    window.addEventListener("touchmove", this, false);
 
     Elements.browsers.addEventListener("URLChanged", this, true);
     Elements.browsers.addEventListener("SizeChanged", this, true);
     Elements.browsers.addEventListener("ZoomChanged", this, true);
 
     Elements.navbar.addEventListener("transitionend", this, true);
+    Elements.navbar.addEventListener("MozAppbarDismissing", this, true);
 
     this.overlay.enabled = true;
   },
@@ -539,18 +544,20 @@ var SelectionHelperUI = {
 
     window.removeEventListener("keypress", this, true);
     window.removeEventListener("click", this, false);
-    window.removeEventListener("touchstart", this, true);
-    window.removeEventListener("touchend", this, true);
-    window.removeEventListener("touchmove", this, true);
+    window.removeEventListener("touchstart", this, false);
+    window.removeEventListener("touchend", this, false);
+    window.removeEventListener("touchmove", this, false);
     window.removeEventListener("MozPrecisePointer", this, true);
     window.removeEventListener("MozDeckOffsetChanging", this, true);
     window.removeEventListener("MozDeckOffsetChanged", this, true);
+    window.removeEventListener("KeyboardChanged", this, true);
 
     Elements.browsers.removeEventListener("URLChanged", this, true);
     Elements.browsers.removeEventListener("SizeChanged", this, true);
     Elements.browsers.removeEventListener("ZoomChanged", this, true);
 
     Elements.navbar.removeEventListener("transitionend", this, true);
+    Elements.navbar.removeEventListener("MozAppbarDismissing", this, true);
 
     this._shutdownAllMarkers();
 
@@ -610,6 +617,16 @@ var SelectionHelperUI = {
     this.startMark.position(targetMark.xPos, targetMark.yPos);
     this.endMark.position(targetMark.xPos, targetMark.yPos);
 
+    // We delay transitioning until we know which direction the user is dragging
+    // based on a hysteresis value in the drag marker code. Down in our caller, we
+    // cache the first drag position in _cachedCaretPos so we can select from the
+    // initial caret drag position. Use those values if we have them. (Note
+    // _cachedCaretPos has already been translated in _getMarkerBaseMessage.)
+    let xpos = this._cachedCaretPos ? this._cachedCaretPos.xPos :
+      this._msgTarget.ctobx(targetMark.xPos, true);
+    let ypos = this._cachedCaretPos ? this._cachedCaretPos.yPos :
+      this._msgTarget.ctoby(targetMark.yPos, true);
+
     // Start the selection monocle drag. SelectionHandler relies on this
     // for getting initialized. This will also trigger a message back for
     // monocle positioning. Note, markerDragMove is still on the stack in
@@ -617,8 +634,8 @@ var SelectionHelperUI = {
     this._sendAsyncMessage("Browser:SelectionSwitchMode", {
       newMode: "selection",
       change: targetMark.tag,
-      xPos: this._msgTarget.ctobx(targetMark.xPos, true),
-      yPos: this._msgTarget.ctoby(targetMark.yPos, true),
+      xPos: xpos,
+      yPos: ypos,
     });
   },
 
@@ -834,10 +851,7 @@ var SelectionHelperUI = {
 
     if (this._hitTestSelection(aEvent) && this._targetIsEditable) {
       // Attach to the newly placed caret position
-      this._sendAsyncMessage("Browser:CaretAttach", {
-        xPos: aEvent.clientX,
-        yPos: aEvent.clientY
-      });
+      this.attachToCaret(this._msgTarget, aEvent.clientX, aEvent.clientY);
       return;
     }
 
@@ -890,9 +904,30 @@ var SelectionHelperUI = {
     if (this.layerMode == kContentLayer) {
       return;
     }
+
     if (aEvent.propertyName == "bottom" && Elements.navbar.isShowing) {
       this._sendAsyncMessage("Browser:SelectionUpdate", {});
+      return;
     }
+    
+    if (aEvent.propertyName == "transform" && Elements.navbar.isShowing) {
+      this._sendAsyncMessage("Browser:SelectionUpdate", {});
+      this._showMonocles(ChromeSelectionHandler.hasSelection);
+    }
+  },
+
+  _onNavBarDismissEvent: function _onNavBarDismissEvent() {
+    if (!this.isActive || this.layerMode == kContentLayer) {
+      return;
+    }
+    this._hideMonocles();
+  },
+
+  _onKeyboardChangedEvent: function _onKeyboardChangedEvent() {
+    if (!this.isActive || this.layerMode == kContentLayer) {
+      return;
+    }
+    this._sendAsyncMessage("Browser:SelectionUpdate", {});
   },
 
   /*
@@ -990,6 +1025,11 @@ var SelectionHelperUI = {
       case "touchstart": {
         if (aEvent.touches.length != 1)
           break;
+        // Only prevent default if we're dragging so that
+        // APZC doesn't scroll.
+        if (this._checkForActiveDrag()) {
+          aEvent.preventDefault();
+        }
         let touch = aEvent.touches[0];
         this._movement.x = touch.clientX;
         this._movement.y = touch.clientY;
@@ -1044,6 +1084,14 @@ var SelectionHelperUI = {
       case "transitionend":
         this._onNavBarTransitionEvent(aEvent);
         break;
+
+      case "MozAppbarDismissing":
+        this._onNavBarDismissEvent();
+        break;
+
+      case "KeyboardChanged":
+        this._onKeyboardChangedEvent();
+        break;
     }
   },
 
@@ -1097,6 +1145,7 @@ var SelectionHelperUI = {
   markerDragStart: function markerDragStart(aMarker) {
     let json = this._getMarkerBaseMessage(aMarker.tag);
     if (aMarker.tag == "caret") {
+      this._cachedCaretPos = null;
       this._sendAsyncMessage("Browser:CaretMove", json);
       return;
     }
@@ -1123,8 +1172,13 @@ var SelectionHelperUI = {
         this._transitionFromCaretToSelection(aDirection);
         return false;
       }
+      // Cache for when we start the drag in _transitionFromCaretToSelection.
+      if (!this._cachedCaretPos) {
+        this._cachedCaretPos = this._getMarkerBaseMessage(aMarker.tag).caret;
+      }
       return true;
     }
+    this._cachedCaretPos = null;
 
     // We'll re-display these after the drag is complete.
     this._hideMonocles();

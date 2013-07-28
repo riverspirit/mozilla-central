@@ -147,12 +147,9 @@ pref("signon.expireMasterPassword", false);
 pref("signon.SignonFileName", "signons.txt");
 pref("signon.debug", false);
 
-/* form helper */
-// 0 = disabled, 1 = enabled, 2 = dynamic depending on screen size
-pref("formhelper.mode", 2);
+/* form helper (scroll to and optionally zoom into editable fields)  */
+pref("formhelper.mode", 2);  // 0 = disabled, 1 = enabled, 2 = dynamic depending on screen size
 pref("formhelper.autozoom", true);
-pref("formhelper.autozoom.caret", true);
-pref("formhelper.restore", false);
 
 /* find helper */
 pref("findhelper.autozoom", true);
@@ -655,11 +652,15 @@ pref("ui.scrolling.axis_lock_mode", "standard");
 
 // Enable accessibility mode if platform accessibility is enabled.
 pref("accessibility.accessfu.activate", 2);
-pref("accessibility.accessfu.quicknav_modes", "Link,Heading,FormElement,ListItem");
+pref("accessibility.accessfu.quicknav_modes", "Link,Heading,FormElement,Landmark,ListItem");
 // Setting for an utterance order (0 - description first, 1 - description last).
-pref("accessibility.accessfu.utterance", 0);
+pref("accessibility.accessfu.utterance", 1);
 // Whether to skip images with empty alt text
 pref("accessibility.accessfu.skip_empty_images", true);
+
+// Transmit UDP busy-work to the LAN when anticipating low latency
+// network reads and on wifi to mitigate 802.11 Power Save Polling delays
+pref("network.tickle-wifi.enabled", true);
 
 // Mobile manages state by autodetection
 pref("network.manage-offline-status", true);
@@ -750,8 +751,25 @@ pref("dom.payment.provider.0.type", "mozilla/payments/pay/v1");
 pref("dom.payment.provider.0.requestMethod", "GET");
 #endif
 
+// Contacts API
+pref("dom.mozContacts.enabled", true);
+pref("dom.navigator-property.disable.mozContacts", false);
+pref("dom.global-constructor.disable.mozContact", false);
+
+// Shortnumber matching needed for e.g. Brazil:
+// 01187654321 can be found with 87654321
+pref("dom.phonenumber.substringmatching.BR", 8);
+pref("dom.phonenumber.substringmatching.CO", 10);
+pref("dom.phonenumber.substringmatching.VE", 7);
+
 // Support for the mozAudioChannel attribute on media elements is disabled in non-webapps
 pref("media.useAudioChannelService", false);
 
 // Turn on the CSP 1.0 parser for Content Security Policy headers
 pref("security.csp.speccompliant", true);
+
+// Enable hardware-accelerated Skia canvas
+pref("gfx.canvas.azure.backends", "skia");
+pref("gfx.canvas.azure.accelerated", true);
+
+pref("general.useragent.override.youtube.com", "Android; Tablet;#Android; Mobile;");

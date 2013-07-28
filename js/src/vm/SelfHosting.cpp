@@ -6,13 +6,13 @@
 
 #include "jscntxt.h"
 #include "jscompartment.h"
-#include "jsobj.h"
 #include "jsfriendapi.h"
+#include "jsobj.h"
+#include "selfhosted.out.h"
 
 #include "builtin/Intl.h"
 #include "builtin/ParallelArray.h"
 #include "gc/Marking.h"
-
 #include "vm/ForkJoin.h"
 #include "vm/Interpreter.h"
 
@@ -20,10 +20,7 @@
 
 #include "vm/BooleanObject-inl.h"
 #include "vm/NumberObject-inl.h"
-#include "vm/RegExpObject-inl.h"
 #include "vm/StringObject-inl.h"
-
-#include "selfhosted.out.h"
 
 using namespace js;
 using namespace js::selfhosted;
@@ -137,7 +134,7 @@ intrinsic_ToInteger(JSContext *cx, unsigned argc, Value *vp)
 {
     CallArgs args = CallArgsFromVp(argc, vp);
     double result;
-    if (!ToInteger(cx, args.handleAt(0), &result))
+    if (!ToInteger(cx, args[0], &result))
         return false;
     args.rval().setDouble(result);
     return true;
@@ -195,7 +192,7 @@ intrinsic_AssertionFailed(JSContext *cx, unsigned argc, Value *vp)
     CallArgs args = CallArgsFromVp(argc, vp);
     if (args.length() > 0) {
         // try to dump the informative string
-        JSString *str = ToString<CanGC>(cx, args.handleAt(0));
+        JSString *str = ToString<CanGC>(cx, args[0]);
         if (str) {
             const jschar *chars = str->getChars(cx);
             if (chars) {
@@ -222,7 +219,7 @@ intrinsic_MakeConstructible(JSContext *cx, unsigned argc, Value *vp)
     // Normal .prototype properties aren't enumerable.  But for this to clone
     // correctly, it must be enumerable.
     RootedObject ctor(cx, &args[0].toObject());
-    if (!JSObject::defineProperty(cx, ctor, cx->names().classPrototype, args.handleAt(1),
+    if (!JSObject::defineProperty(cx, ctor, cx->names().classPrototype, args[1],
                                   JS_PropertyStub, JS_StrictPropertyStub,
                                   JSPROP_READONLY | JSPROP_ENUMERATE | JSPROP_PERMANENT))
     {
@@ -283,6 +280,8 @@ intrinsic_DecompileArg(JSContext *cx, unsigned argc, Value *vp)
  * - |cloneAtCallsite: true| will hint that |fun| should be cloned
  *   each callsite to improve TI resolution.  This is important for
  *   higher-order functions like |Array.map|.
+ * - |inline: true| will hint that |fun| be inlined regardless of
+ *   JIT heuristics.
  */
 static JSBool
 intrinsic_SetScriptHints(JSContext *cx, unsigned argc, Value *vp)
@@ -305,6 +304,12 @@ intrinsic_SetScriptHints(JSContext *cx, unsigned argc, Value *vp)
     if (ToBoolean(propv))
         funScript->shouldCloneAtCallsite = true;
 
+    id = AtomToId(Atomize(cx, "inline", strlen("inline")));
+    if (!JSObject::getGeneric(cx, flags, flags, id, &propv))
+        return false;
+    if (ToBoolean(propv))
+        funScript->shouldInline = true;
+
     args.rval().setUndefined();
     return true;
 }
@@ -314,14 +319,41 @@ intrinsic_SetScriptHints(JSContext *cx, unsigned argc, Value *vp)
  * Dump(val): Dumps a value for debugging, even in parallel mode.
  */
 JSBool
-js::intrinsic_Dump(JSContext *cx, unsigned argc, Value *vp)
+intrinsic_Dump(ThreadSafeContext *cx, unsigned argc, Value *vp)
 {
     CallArgs args = CallArgsFromVp(argc, vp);
-    RootedValue val(cx, args[0]);
-    js_DumpValue(val);
+    js_DumpValue(args[0]);
+    if (args[0].isObject()) {
+        fprintf(stderr, "\n");
+        js_DumpObject(&args[0].toObject());
+    }
     args.rval().setUndefined();
     return true;
 }
+
+const JSJitInfo intrinsic_Dump_jitInfo =
+    JS_JITINFO_NATIVE_PARALLEL(JSParallelNativeThreadSafeWrapper<intrinsic_Dump>);
+
+JSBool
+intrinsic_ParallelSpew(ThreadSafeContext *cx, unsigned argc, Value *vp)
+{
+    CallArgs args = CallArgsFromVp(argc, vp);
+    JS_ASSERT(args.length() == 1);
+    JS_ASSERT(args[0].isString());
+
+    ScopedThreadSafeStringInspector inspector(args[0].toString());
+    if (!inspector.ensureChars(cx))
+        return false;
+
+    ScopedJSFreePtr<char> bytes(TwoByteCharsToNewUTF8CharsZ(cx, inspector.range()).c_str());
+    parallel::Spew(parallel::SpewOps, bytes);
+
+    args.rval().setUndefined();
+    return true;
+}
+
+const JSJitInfo intrinsic_ParallelSpew_jitInfo =
+    JS_JITINFO_NATIVE_PARALLEL(JSParallelNativeThreadSafeWrapper<intrinsic_ParallelSpew>);
 #endif
 
 /*
@@ -634,8 +666,18 @@ const JSFunctionSpec intrinsic_functions[] = {
     JS_FN("intl_numberingSystem", intl_numberingSystem, 1,0),
     JS_FN("intl_patternForSkeleton", intl_patternForSkeleton, 2,0),
 
+    // See builtin/RegExp.h for descriptions of the regexp_* functions.
+    JS_FN("regexp_exec_no_statics", regexp_exec_no_statics, 2,0),
+    JS_FN("regexp_test_no_statics", regexp_test_no_statics, 2,0),
+
 #ifdef DEBUG
-    JS_FN("Dump",                 intrinsic_Dump,                 1,0),
+    JS_FNINFO("Dump",
+              JSNativeThreadSafeWrapper<intrinsic_Dump>,
+              &intrinsic_Dump_jitInfo, 1,0),
+
+    JS_FNINFO("ParallelSpew",
+              JSNativeThreadSafeWrapper<intrinsic_ParallelSpew>,
+              &intrinsic_ParallelSpew_jitInfo, 1,0),
 #endif
 
     JS_FS_END
@@ -648,8 +690,8 @@ JSRuntime::initSelfHosting(JSContext *cx)
     RootedObject savedGlobal(cx, js::GetDefaultGlobalForContext(cx));
     if (!(selfHostingGlobal_ = JS_NewGlobalObject(cx, &self_hosting_global_class, NULL)))
         return false;
+    JSAutoCompartment ac(cx, selfHostingGlobal_);
     JS_SetGlobalObject(cx, selfHostingGlobal_);
-    JSAutoCompartment ac(cx, cx->global());
     Rooted<GlobalObject*> shg(cx, &selfHostingGlobal_->as<GlobalObject>());
     /*
      * During initialization of standard classes for the self-hosting global,
@@ -662,6 +704,20 @@ JSRuntime::initSelfHosting(JSContext *cx)
     if (!JS_DefineFunctions(cx, shg, intrinsic_functions))
         return false;
 
+    /*
+     * In self-hosting mode, scripts emit JSOP_CALLINTRINSIC instead of
+     * JSOP_NAME or JSOP_GNAME to access unbound variables. JSOP_CALLINTRINSIC
+     * does a name lookup in a special object, whose properties are filled in
+     * lazily upon first access for a given global.
+     *
+     * As that object is inaccessible to client code, the lookups are
+     * guaranteed to return the original objects, ensuring safe implementation
+     * of self-hosted builtins.
+     *
+     * Additionally, the special syntax _CallFunction(receiver, ...args, fun)
+     * is supported, for which bytecode is emitted that invokes |fun| with
+     * |receiver| as the this-object and ...args as the arguments..
+     */
     CompileOptions options(cx);
     options.setFileAndLine("self-hosted", 1);
     options.setSelfHostingMode(true);
@@ -843,9 +899,7 @@ CloneValue(JSContext *cx, MutableHandleValue vp, CloneMemory &clonedObjects)
             return false;
         vp.setString(clone);
     } else {
-        if (JSString *valSrc = JS_ValueToSource(cx, vp))
-            printf("Error: Can't yet clone value: %s\n", JS_EncodeString(cx, valSrc));
-        return false;
+        MOZ_ASSUME_UNREACHABLE("Self-hosting CloneValue can't clone given value.");
     }
     return true;
 }

@@ -73,7 +73,6 @@ EXPORTS.js += [
     '../public/PropertyKey.h',
     '../public/RequiredDefines.h',
     '../public/RootingAPI.h',
-    '../public/TemplateLib.h',
     '../public/Utility.h',
     '../public/Value.h',
     '../public/Vector.h',
@@ -81,6 +80,7 @@ EXPORTS.js += [
 
 CPP_SOURCES += [
     'ArgumentsObject.cpp',
+    'BinaryData.cpp',
     'BytecodeCompiler.cpp',
     'BytecodeEmitter.cpp',
     'CharacterEncoding.cpp',
@@ -112,6 +112,7 @@ CPP_SOURCES += [
     'Probes.cpp',
     'Profilers.cpp',
     'PropertyKey.cpp',
+    'ProxyObject.cpp',
     'RegExp.cpp',
     'RegExpObject.cpp',
     'RegExpStatics.cpp',

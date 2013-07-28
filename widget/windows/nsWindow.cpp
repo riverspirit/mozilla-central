@@ -141,6 +141,11 @@
 #include <richedit.h>
 
 #if defined(ACCESSIBILITY)
+
+#ifdef DEBUG
+#include "mozilla/a11y/Logging.h"
+#endif
+
 #include "oleidl.h"
 #include <winuser.h>
 #include "nsAccessibilityService.h"
@@ -651,8 +656,8 @@ NS_METHOD nsWindow::Destroy()
   // Our windows can be subclassed which may prevent us receiving WM_DESTROY. If OnDestroy()
   // didn't get called, call it now.
   if (false == mOnDestroyCalled) {
-    LRESULT result;
-    mWindowHook.Notify(mWnd, WM_DESTROY, 0, 0, &result);
+    MSGResult msgResult;
+    mWindowHook.Notify(mWnd, WM_DESTROY, 0, 0, msgResult);
     OnDestroy();
   }
 
@@ -3869,10 +3874,6 @@ bool nsWindow::DispatchMouseEvent(uint32_t aEventType, WPARAM wParam,
   else if (aEventType == NS_MOUSE_EXIT) {
     event.exit = IsTopLevelMouseExit(mWnd) ? nsMouseEvent::eTopLevel : nsMouseEvent::eChild;
   }
-  else if (aEventType == NS_MOUSE_MOZHITTEST)
-  {
-    event.mFlags.mOnlyChromeDispatch = true;
-  }
   event.clickCount = sLastClickCount;
 
 #ifdef NS_DEBUG_XX
@@ -4349,28 +4350,26 @@ LRESULT CALLBACK nsWindow::WindowProcInternal(HWND hWnd, UINT msg, WPARAM wParam
 // processed by the caller self.
 bool
 nsWindow::ProcessMessageForPlugin(const MSG &aMsg,
-                                  LRESULT *aResult,
-                                  bool &aCallDefWndProc)
+                                  MSGResult& aResult)
 {
-  NS_PRECONDITION(aResult, "aResult must be non-null.");
-  *aResult = 0;
+  aResult.mResult = 0;
+  aResult.mConsumed = true;
 
-  aCallDefWndProc = false;
   bool eventDispatched = false;
   switch (aMsg.message) {
     case WM_CHAR:
     case WM_SYSCHAR:
-      *aResult = ProcessCharMessage(aMsg, &eventDispatched);
+      aResult.mResult = ProcessCharMessage(aMsg, &eventDispatched);
       break;
 
     case WM_KEYUP:
     case WM_SYSKEYUP:
-      *aResult = ProcessKeyUpMessage(aMsg, &eventDispatched);
+      aResult.mResult = ProcessKeyUpMessage(aMsg, &eventDispatched);
       break;
 
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN:
-      *aResult = ProcessKeyDownMessage(aMsg, &eventDispatched);
+      aResult.mResult = ProcessKeyDownMessage(aMsg, &eventDispatched);
       break;
 
     case WM_DEADCHAR:
@@ -4387,9 +4386,12 @@ nsWindow::ProcessMessageForPlugin(const MSG &aMsg,
       return false;
   }
 
-  if (!eventDispatched)
-    aCallDefWndProc = !nsWindowBase::DispatchPluginEvent(aMsg);
-  DispatchPendingEvents();
+  if (!eventDispatched) {
+    aResult.mConsumed = nsWindowBase::DispatchPluginEvent(aMsg);
+  }
+  if (!Destroyed()) {
+    DispatchPendingEvents();
+  }
   return true;
 }
 
@@ -4422,37 +4424,49 @@ static bool CleartypeSettingChanged()
   return true;
 }
 
-// The main windows message processing method.
-bool nsWindow::ProcessMessage(UINT msg, WPARAM &wParam, LPARAM &lParam,
-                                LRESULT *aRetValue)
+bool
+nsWindow::ExternalHandlerProcessMessage(UINT aMessage,
+                                        WPARAM& aWParam,
+                                        LPARAM& aLParam,
+                                        MSGResult& aResult)
 {
-  // (Large blocks of code should be broken out into OnEvent handlers.)
-  if (mWindowHook.Notify(mWnd, msg, wParam, lParam, aRetValue))
+  if (mWindowHook.Notify(mWnd, aMessage, aWParam, aLParam, aResult)) {
     return true;
+  }
 
+  if (IMEHandler::ProcessMessage(this, aMessage, aWParam, aLParam, aResult)) {
+    return true;
+  }
+
+  if (MouseScrollHandler::ProcessMessage(this, aMessage, aWParam, aLParam,
+                                         aResult)) {
+    return true;
+  }
+
+  if (PluginHasFocus()) {
+    MSG nativeMsg = WinUtils::InitMSG(aMessage, aWParam, aLParam, mWnd);
+    if (ProcessMessageForPlugin(nativeMsg, aResult)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+// The main windows message processing method.
+bool
+nsWindow::ProcessMessage(UINT msg, WPARAM& wParam, LPARAM& lParam,
+                         LRESULT *aRetValue)
+{
 #if defined(EVENT_DEBUG_OUTPUT)
   // First param shows all events, second param indicates whether
   // to show mouse move events. See nsWindowDbg for details.
   PrintEvent(msg, SHOW_REPEAT_EVENTS, SHOW_MOUSEMOVE_EVENTS);
 #endif
 
-  bool eatMessage;
-  if (IMEHandler::ProcessMessage(this, msg, wParam, lParam, aRetValue,
-                                 eatMessage)) {
-    return mWnd ? eatMessage : true;
-  }
-
-  if (MouseScrollHandler::ProcessMessage(this, msg, wParam, lParam, aRetValue,
-                                         eatMessage)) {
-    return mWnd ? eatMessage : true;
-  }
-
-  if (PluginHasFocus()) {
-    bool callDefaultWndProc;
-    MSG nativeMsg = WinUtils::InitMSG(msg, wParam, lParam, mWnd);
-    if (ProcessMessageForPlugin(nativeMsg, aRetValue, callDefaultWndProc)) {
-      return mWnd ? !callDefaultWndProc : true;
-    }
+  MSGResult msgResult(aRetValue);
+  if (ExternalHandlerProcessMessage(msg, wParam, lParam, msgResult)) {
+    return (msgResult.mConsumed || !mWnd);
   }
 
   bool result = false;    // call the default nsWindow proc
@@ -4467,6 +4481,7 @@ bool nsWindow::ProcessMessage(UINT msg, WPARAM &wParam, LPARAM &lParam,
     return true;
   }
 
+  // (Large blocks of code should be broken out into OnEvent handlers.)
   switch (msg) {
     // WM_QUERYENDSESSION must be handled by all windows.
     // Otherwise Windows thinks the window can just be killed at will.
@@ -4864,13 +4879,17 @@ bool nsWindow::ProcessMessage(UINT msg, WPARAM &wParam, LPARAM &lParam,
                                   contextMenukey ?
                                     nsMouseEvent::eLeftButton :
                                     nsMouseEvent::eRightButton, MOUSE_INPUT_SOURCE());
-      if (lParam != -1 && !result && mCustomNonClient &&
-          DispatchMouseEvent(NS_MOUSE_MOZHITTEST, wParam, pos,
-                             false, nsMouseEvent::eLeftButton,
-                             MOUSE_INPUT_SOURCE())) {
-        // Blank area hit, throw up the system menu.
-        DisplaySystemMenu(mWnd, mSizeMode, mIsRTL, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
-        result = true;
+      if (lParam != -1 && !result && mCustomNonClient) {
+        nsMouseEvent event(true, NS_MOUSE_MOZHITTEST, this, nsMouseEvent::eReal,
+                           nsMouseEvent::eNormal);
+        event.refPoint = nsIntPoint(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+        event.inputSource = MOUSE_INPUT_SOURCE();
+        event.mFlags.mOnlyChromeDispatch = true;
+        if (DispatchWindowEvent(&event)) {
+          // Blank area hit, throw up the system menu.
+          DisplaySystemMenu(mWnd, mSizeMode, mIsRTL, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+          result = true;
+        }
       }
     }
     break;
@@ -5540,10 +5559,14 @@ nsWindow::ClientMarginHitTestPoint(int32_t mx, int32_t my)
   }
 
   if (!sIsInMouseCapture && allowContentOverride) {
-    LPARAM lParam = MAKELPARAM(mx, my);
-    LPARAM lParamClient = lParamToClient(lParam);
-    bool result = DispatchMouseEvent(NS_MOUSE_MOZHITTEST, 0, lParamClient,
-                                     false, nsMouseEvent::eLeftButton, MOUSE_INPUT_SOURCE());
+    nsMouseEvent event(true, NS_MOUSE_MOZHITTEST, this, nsMouseEvent::eReal,
+                       nsMouseEvent::eNormal);
+    POINT pt = { mx, my };
+    ::ScreenToClient(mWnd, &pt);
+    event.refPoint = nsIntPoint(pt.x, pt.y);
+    event.inputSource = MOUSE_INPUT_SOURCE();
+    event.mFlags.mOnlyChromeDispatch = true;
+    bool result = DispatchWindowEvent(&event);
     if (result) {
       // The mouse is over a blank area
       testResult = testResult == HTCLIENT ? HTCAPTION : testResult;
@@ -6625,20 +6648,19 @@ nsWindow::GetIMEUpdatePreference()
 }
 
 #ifdef ACCESSIBILITY
-
-#ifdef DEBUG_WMGETOBJECT
+#ifdef DEBUG
 #define NS_LOG_WMGETOBJECT(aWnd, aHwnd, aAcc)                                  \
-  PR_LOG(gWindowsLog, PR_LOG_ALWAYS,                                           \
-         ("Get the window:\n  {\n     HWND: %d, parent HWND: %d, wndobj: %p,\n",\
-           aHwnd, ::GetParent(aHwnd), aWnd));                                  \
-  PR_LOG(gWindowsLog, PR_LOG_ALWAYS, ("     acc: %p", aAcc));                  \
-  if (aAcc) {                                                                  \
-    nsAutoString name;                                                         \
-    aAcc->Name(name);                                                          \
-    PR_LOG(gWindowsLog, PR_LOG_ALWAYS,                                         \
-           (", accname: %s", NS_ConvertUTF16toUTF8(name).get()));              \
-  }                                                                            \
-  PR_LOG(gWindowsLog, PR_LOG_ALWAYS, ("\n }\n"));
+  if (a11y::logging::IsEnabled(a11y::logging::ePlatforms)) {                   \
+    printf("Get the window:\n  {\n     HWND: %d, parent HWND: %d, wndobj: %p,\n",\
+           aHwnd, ::GetParent(aHwnd), aWnd);                                   \
+    printf("     acc: %p", aAcc);                                              \
+    if (aAcc) {                                                                \
+      nsAutoString name;                                                       \
+      aAcc->Name(name);                                                        \
+      printf(", accname: %s", NS_ConvertUTF16toUTF8(name).get());              \
+    }                                                                          \
+    printf("\n }\n");                                                          \
+  }
 
 #else
 #define NS_LOG_WMGETOBJECT(aWnd, aHwnd, aAcc)
@@ -6667,8 +6689,8 @@ nsWindow::GetAccessible()
           GetAccService()->GetDocAccessible(frame->PresContext()->PresShell());
         if (docAcc) {
           NS_LOG_WMGETOBJECT(this, mWnd,
-                             docAcc->GetAccessible(frame->GetContent()));
-          return docAcc->GetAccessible(frame->GetContent());
+                             docAcc->GetAccessibleOrDescendant(frame->GetContent()));
+          return docAcc->GetAccessibleOrDescendant(frame->GetContent());
         }
       }
     }

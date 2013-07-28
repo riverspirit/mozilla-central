@@ -1650,6 +1650,7 @@ nsContentUtils::TraceSafeJSContext(JSTracer* aTrc)
     return;
   }
   if (JSObject* global = js::GetDefaultGlobalForContext(cx)) {
+    JS::AssertGCThingMustBeTenured(global);
     JS_CallObjectTracer(aTrc, &global, "safe context");
     MOZ_ASSERT(global == js::GetDefaultGlobalForContext(cx));
   }
@@ -1748,8 +1749,7 @@ bool
 nsContentUtils::LookupBindingMember(JSContext* aCx, nsIContent *aContent,
                                     JS::HandleId aId, JSPropertyDescriptor* aDesc)
 {
-  nsXBLBinding* binding = aContent->OwnerDoc()->BindingManager()
-                                  ->GetBinding(aContent);
+  nsXBLBinding* binding = aContent->GetXBLBinding();
   if (!binding)
     return true;
   return binding->LookupMember(aCx, aId, aDesc);
@@ -3568,8 +3568,7 @@ nsContentUtils::HasMutationListeners(nsINode* aNode,
 
     if (aNode->IsNodeOfType(nsINode::eCONTENT)) {
       nsIContent* content = static_cast<nsIContent*>(aNode);
-      nsIContent* insertionParent =
-        doc->BindingManager()->GetInsertionParent(content);
+      nsIContent* insertionParent = content->GetXBLInsertionParent();
       if (insertionParent) {
         aNode = insertionParent;
         continue;
@@ -4532,7 +4531,8 @@ nsContentUtils::DOMEventToNativeKeyEvent(nsIDOMKeyEvent* aKeyEvent,
   aKeyEvent->GetShiftKey(&aNativeEvent->shiftKey);
   aKeyEvent->GetMetaKey(&aNativeEvent->metaKey);
 
-  aNativeEvent->nativeEvent = GetNativeEvent(aKeyEvent);
+  aNativeEvent->mGeckoEvent =
+    static_cast<nsKeyEvent*>(GetNativeEvent(aKeyEvent));
 
   return true;
 }
@@ -6105,7 +6105,8 @@ nsContentUtils::SetUpChannelOwner(nsIPrincipal* aLoadingPrincipal,
     if (aForceOwner) {
       nsAutoCString uriStr;
       aURI->GetSpec(uriStr);
-      if(!uriStr.EqualsLiteral("about:srcdoc")) {
+      if(!uriStr.EqualsLiteral("about:srcdoc") &&
+         !uriStr.EqualsLiteral("view-source:about:srcdoc")) {
         nsCOMPtr<nsIURI> ownerURI;
         nsresult rv = aLoadingPrincipal->GetURI(getter_AddRefs(ownerURI));
         MOZ_ASSERT(NS_SUCCEEDED(rv) && SchemeIs(ownerURI, NS_NULLPRINCIPAL_SCHEME));

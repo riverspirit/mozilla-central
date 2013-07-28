@@ -13,6 +13,9 @@
 # error "Generational GC requires exact rooting."
 #endif
 
+#include "mozilla/DebugOnly.h"
+#include "mozilla/ReentrancyGuard.h"
+
 #include "jsalloc.h"
 #include "jsgc.h"
 #include "jsobj.h"
@@ -77,6 +80,7 @@ class StoreBuffer
     class MonoTypeBuffer
     {
         friend class StoreBuffer;
+        friend class mozilla::ReentrancyGuard;
 
         StoreBuffer *owner;
 
@@ -97,8 +101,10 @@ class StoreBuffer
          */
         EdgeSet duplicates;
 
+        mozilla::DebugOnly<bool> entered;
+
         MonoTypeBuffer(StoreBuffer *owner)
-          : owner(owner), base(NULL), pos(NULL), top(NULL)
+          : owner(owner), base(NULL), pos(NULL), top(NULL), entered(false)
         {
             duplicates.init();
         }
@@ -125,6 +131,7 @@ class StoreBuffer
 
         /* Add one item to the buffer. */
         void put(const T &v) {
+            mozilla::ReentrancyGuard g(*this);
             JS_ASSERT(!owner->inParallelSection());
 
             /* Check if we have been enabled. */
@@ -180,6 +187,7 @@ class StoreBuffer
     class GenericBuffer
     {
         friend class StoreBuffer;
+        friend class mozilla::ReentrancyGuard;
 
         StoreBuffer *owner;
 
@@ -187,8 +195,10 @@ class StoreBuffer
         uint8_t *pos;  /* Pointer to current buffer position. */
         uint8_t *top;  /* Pointer to one past the last entry. */
 
+        mozilla::DebugOnly<bool> entered;
+
         GenericBuffer(StoreBuffer *owner)
-          : owner(owner)
+          : owner(owner), base(NULL), pos(NULL), top(NULL), entered(false)
         {}
 
         GenericBuffer &operator=(const GenericBuffer& other) MOZ_DELETE;
@@ -202,6 +212,7 @@ class StoreBuffer
 
         template <typename T>
         void put(const T &t) {
+            mozilla::ReentrancyGuard g(*this);
             JS_ASSERT(!owner->inParallelSection());
 
             /* Ensure T is derived from BufferableRef. */
@@ -346,17 +357,18 @@ class StoreBuffer
     class CallbackRef : public BufferableRef
     {
       public:
-        typedef void (*MarkCallback)(JSTracer *trc, void *key);
+        typedef void (*MarkCallback)(JSTracer *trc, void *key, void *data);
 
-        CallbackRef(MarkCallback cb, void *k) : callback(cb), key(k) {}
+        CallbackRef(MarkCallback cb, void *k, void *d) : callback(cb), key(k), data(d) {}
 
         virtual void mark(JSTracer *trc) {
-            callback(trc, key);
+            callback(trc, key, data);
         }
 
       private:
         MarkCallback callback;
         void *key;
+        void *data;
     };
 
     MonoTypeBuffer<ValueEdge> bufferVal;
@@ -368,6 +380,7 @@ class StoreBuffer
     GenericBuffer bufferGeneric;
 
     JSRuntime *runtime;
+    const Nursery &nursery_;
 
     void *buffer;
 
@@ -377,7 +390,7 @@ class StoreBuffer
 
     /* TODO: profile to find the ideal size for these. */
     static const size_t ValueBufferSize = 1 * 1024 * sizeof(ValueEdge);
-    static const size_t CellBufferSize = 2 * 1024 * sizeof(CellPtrEdge);
+    static const size_t CellBufferSize = 8 * 1024 * sizeof(CellPtrEdge);
     static const size_t SlotBufferSize = 2 * 1024 * sizeof(SlotEdge);
     static const size_t WholeCellBufferSize = 2 * 1024 * sizeof(WholeCellEdges);
     static const size_t RelocValueBufferSize = 1 * 1024 * sizeof(ValueEdge);
@@ -389,10 +402,10 @@ class StoreBuffer
                                     GenericBufferSize;
 
   public:
-    explicit StoreBuffer(JSRuntime *rt)
+    explicit StoreBuffer(JSRuntime *rt, const Nursery &nursery)
       : bufferVal(this), bufferCell(this), bufferSlot(this), bufferWholeCell(this),
         bufferRelocVal(this), bufferRelocCell(this), bufferGeneric(this),
-        runtime(rt), buffer(NULL), aboutToOverflow(false), overflowed(false),
+        runtime(rt), nursery_(nursery), buffer(NULL), aboutToOverflow(false), overflowed(false),
         enabled(false)
     {}
 
@@ -441,8 +454,9 @@ class StoreBuffer
     }
 
     /* Insert or update a callback entry. */
-    void putCallback(CallbackRef::MarkCallback callback, void *key) {
-        bufferGeneric.put(CallbackRef(callback, key));
+    void putCallback(CallbackRef::MarkCallback callback, Cell *key, void *data) {
+        if (nursery_.isInside(key))
+            bufferGeneric.put(CallbackRef(callback, key, data));
     }
 
     /* Mark the source of all edges in the store buffer. */

@@ -388,11 +388,11 @@ MacroAssemblerARM::ma_mov(const ImmGCPtr &ptr, Register dest)
     // before to recover the pointer, and not after.
     writeDataRelocation(ptr);
     RelocStyle rs;
-    if (hasMOVWT()) {
+    if (hasMOVWT())
         rs = L_MOVWT;
-    } else {
+    else
         rs = L_LDR;
-    }
+
     ma_movPatchable(Imm32(ptr.value), dest, Always, rs);
 }
 
@@ -882,11 +882,31 @@ MacroAssemblerARM::ma_mod_mask(Register src, Register dest, Register hold, int32
 
 }
 
+void
+MacroAssemblerARM::ma_smod(Register num, Register div, Register dest)
+{
+    as_sdiv(ScratchRegister, num, div);
+    as_mls(dest, num, ScratchRegister, div);
+}
+
+void
+MacroAssemblerARM::ma_umod(Register num, Register div, Register dest)
+{
+    as_udiv(ScratchRegister, num, div);
+    as_mls(dest, num, ScratchRegister, div);
+}
+
 // division
 void
 MacroAssemblerARM::ma_sdiv(Register num, Register div, Register dest, Condition cond)
 {
     as_sdiv(dest, num, div, cond);
+}
+
+void
+MacroAssemblerARM::ma_udiv(Register num, Register div, Register dest, Condition cond)
+{
+    as_udiv(dest, num, div, cond);
 }
 
 // Memory.
@@ -1506,7 +1526,13 @@ MacroAssemblerARMCompat::callWithExitFrame(IonCode *target)
     Push(Imm32(descriptor)); // descriptor
 
     addPendingJump(m_buffer.nextOffset(), target->raw(), Relocation::IONCODE);
-    ma_mov(Imm32((int) target->raw()), ScratchRegister);
+    RelocStyle rs;
+    if (hasMOVWT())
+        rs = L_MOVWT;
+    else
+        rs = L_LDR;
+
+    ma_movPatchable(Imm32((int) target->raw()), ScratchRegister, Always, rs);
     ma_callIonHalfPush(ScratchRegister);
 }
 
@@ -1518,7 +1544,13 @@ MacroAssemblerARMCompat::callWithExitFrame(IonCode *target, Register dynStack)
     Push(dynStack); // descriptor
 
     addPendingJump(m_buffer.nextOffset(), target->raw(), Relocation::IONCODE);
-    ma_mov(Imm32((int) target->raw()), ScratchRegister);
+    RelocStyle rs;
+    if (hasMOVWT())
+        rs = L_MOVWT;
+    else
+        rs = L_LDR;
+
+    ma_movPatchable(Imm32((int) target->raw()), ScratchRegister, Always, rs);
     ma_callIonHalfPush(ScratchRegister);
 }
 
@@ -2949,7 +2981,13 @@ MacroAssemblerARM::ma_callIonHalfPush(const Register r)
 void
 MacroAssemblerARM::ma_call(void *dest)
 {
-    ma_mov(Imm32((uint32_t)dest), CallReg);
+    RelocStyle rs;
+    if (hasMOVWT())
+        rs = L_MOVWT;
+    else
+        rs = L_LDR;
+
+    ma_movPatchable(Imm32((uint32_t) dest), CallReg, Always, rs);
     as_blx(CallReg);
 }
 
@@ -3243,6 +3281,13 @@ MacroAssemblerARMCompat::handleFailureWithHandler(void *handler)
     passABIArg(r0);
     callWithABI(handler);
 
+    IonCode *excTail = GetIonContext()->compartment->ionCompartment()->getExceptionTail();
+    branch(excTail);
+}
+
+void
+MacroAssemblerARMCompat::handleFailureWithHandlerTail()
+{
     Label entryFrame;
     Label catch_;
     Label finally;
